@@ -1,9 +1,16 @@
-import getpass
 import os
 
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from llm import llmchat
+
+load_dotenv()
+
+import getpass
+
+from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
 from langchain.chat_models import init_chat_model
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -131,7 +138,7 @@ def get_nearby_news(lat: float, lon: float, radius_km: int = 50):
 
 
 def _fetch_tavily_news(lat: float, lon: float, api_key: str):
-    """Fetch tourism safety and crime-related news using Tavily Search API"""
+    """Fetch local tourism safety and crime-related news using Tavily Search API"""
     try:
         # Import Tavily here to avoid import errors if not installed
         try:
@@ -144,109 +151,210 @@ def _fetch_tavily_news(lat: float, lon: float, api_key: str):
 
         client = TavilyClient(api_key=api_key)
 
-        # Get location name for better search results
-        location_name = _get_location_name(lat, lon)
+        # Get specific location details for better local search
+        location_info = _get_detailed_location(lat, lon)
+        city = location_info.get("city", "")
+        state = location_info.get("state", "")
+        country = location_info.get("country", "")
 
-        # Create tourism safety and crime specific query
-        query = f"tourist safety crime incidents travel advisory {location_name} recent"
+        # Create multiple location-specific queries for better local coverage
+        queries = [
+            f"{city} tourist safety crime incidents recent news",
+            f"{city} {state} travel advisory security alert",
+            f"{city} visitor safety warning crime report",
+            f"tourist attack {city} recent incident",
+            f"{city} theft robbery tourist scam warning",
+        ]
 
-        try:
-            response = client.search(
-                query=query,
-                search_depth="basic",
-                max_results=5,
-                include_domains=[
-                    "timesofindia.com",
-                    "indianexpress.com",
-                    "hindustantimes.com",
-                    "ndtv.com",
-                    "thehindu.com",
-                    "deccanherald.com",
-                    "news18.com",
-                    "reuters.com",
-                    "bbc.com",
-                    "cnn.com",
-                    "apnews.com",
-                    "traveladvisory.state.gov",
-                ],
-                exclude_domains=[
-                    "twitter.com",
-                    "facebook.com",
-                    "instagram.com",
-                    "reddit.com",
-                ],
-                include_raw_content=False,
-            )
+        all_articles = []
 
-            # Filter and format results focusing on tourism safety
-            articles = []
-            for result in response.get("results", []):
-                title = result.get("title", "")
-                content = result.get("content", "")
-                url = result.get("url", "")
+        for query in queries[:2]:  # Limit to 2 queries to avoid rate limits
+            try:
+                response = client.search(
+                    query=query,
+                    search_depth="advanced",  # Use advanced for better local results
+                    max_results=3,
+                    days=7,  # Only last 7 days for recent local news
+                    include_domains=[
+                        # Local Indian news sources
+                        "timesofindia.com",
+                        "indianexpress.com",
+                        "hindustantimes.com",
+                        "ndtv.com",
+                        "thehindu.com",
+                        "deccanherald.com",
+                        "news18.com",
+                        # International reliable sources
+                        "reuters.com",
+                        "bbc.com",
+                        "apnews.com",
+                        "cnn.com",
+                        # Travel and safety specific
+                        "traveladvisory.state.gov",
+                        "gov.uk",
+                        "smartraveller.gov.au",
+                        # Local news sites (will vary by region)
+                        "localnews.com",
+                        "citytoday.com",
+                        "metropolitan.com",
+                    ],
+                    exclude_domains=[
+                        "twitter.com",
+                        "facebook.com",
+                        "instagram.com",
+                        "reddit.com",
+                        "youtube.com",
+                    ],
+                    include_raw_content=False,
+                )
 
-                # Filter for tourism safety, crime, and security-related content
-                safety_keywords = [
-                    "tourist",
-                    "tourism",
-                    "travel",
-                    "visitor",
-                    "crime",
-                    "safety",
-                    "security",
-                    "robbery",
-                    "theft",
-                    "scam",
-                    "attack",
-                    "warning",
-                    "advisory",
-                    "caution",
-                    "incident",
-                    "assault",
-                    "harassment",
-                    "fraud",
-                    "danger",
-                    "risk",
-                ]
+                # Process results
+                for result in response.get("results", []):
+                    title = result.get("title", "")
+                    content = result.get("content", "")
+                    url = result.get("url", "")
+                    published_date = result.get("published_date", "")
 
-                if any(
-                    keyword.lower() in (title + content).lower()
-                    for keyword in safety_keywords
-                ):
-                    articles.append(
-                        {
+                    # Strong filter for local tourism safety content
+                    if _is_local_safety_relevant(title, content, city, state):
+                        articles_data = {
                             "title": title,
                             "content": content[:300] + "..."
                             if len(content) > 300
                             else content,
                             "url": url,
-                            "relevance": "tourism_safety",
+                            "published_date": published_date,
+                            "location_relevance": "local",
+                            "safety_category": _categorize_safety_news(title, content),
                         }
-                    )
+                        all_articles.append(articles_data)
 
-            return {
-                "articles": articles,
-                "status": "success",
-                "source": "tavily",
-                "query_used": query,
-                "location": location_name,
-            }
+            except Exception as e:
+                print(f"Error in Tavily search for query '{query}': {e}")
+                continue
 
-        except Exception as e:
-            return {"error": f"Tavily API error: {str(e)}", "articles": []}
+        # Remove duplicates and sort by relevance
+        unique_articles = []
+        seen_titles = set()
+
+        for article in all_articles:
+            title_key = article["title"].lower().strip()
+            if title_key not in seen_titles:
+                seen_titles.add(title_key)
+                unique_articles.append(article)
+
+        return {
+            "articles": unique_articles[:5],  # Top 5 most relevant
+            "status": "success",
+            "location_searched": f"{city}, {state}, {country}",
+            "queries_used": queries[:2],
+        }
 
     except Exception as e:
-        return {"error": f"Tavily integration error: {str(e)}", "articles": []}
+        return {"error": f"Tavily API error: {str(e)}", "articles": []}
 
 
-def _get_location_name(lat: float, lon: float) -> str:
-    """Get location name from coordinates using a simple geocoding approach"""
+def _get_detailed_location(lat: float, lon: float):
+    """Get detailed location information using reverse geocoding"""
     try:
-        # You can integrate with a proper geocoding service here
-        # For now, return a simple coordinate-based identifier
-        return f"lat_{lat:.2f}_lon_{lon:.2f}"
-    except:
-        return f"location_{lat:.1f}_{lon:.1f}"
+        # Use OpenStreetMap Nominatim for free reverse geocoding
+        url = "https://nominatim.openstreetmap.org/reverse"
+        params = {"lat": lat, "lon": lon, "format": "json", "accept-language": "en"}
+        headers = {"User-Agent": "GuardianEye-TouristSafety/1.0"}
+
+        response = requests.get(url, params=params, headers=headers, timeout=5)
+
+        if response.status_code == 200:
+            data = response.json()
+            address = data.get("address", {})
+
+            return {
+                "city": address.get("city")
+                or address.get("town")
+                or address.get("village")
+                or address.get("suburb", ""),
+                "state": address.get("state")
+                or address.get("province")
+                or address.get("region", ""),
+                "country": address.get("country", ""),
+                "display_name": data.get("display_name", ""),
+            }
+    except Exception as e:
+        print(f"Geocoding error: {e}")
+
+    # Fallback to coordinate-based description
+    return {
+        "city": f"Location near {lat:.4f},{lon:.4f}",
+        "state": "",
+        "country": "",
+        "display_name": f"{lat:.4f}, {lon:.4f}",
+    }
+
+
+def _is_local_safety_relevant(title: str, content: str, city: str, state: str) -> bool:
+    """Check if the news is relevant to local tourism safety"""
+    text = f"{title} {content}".lower()
+
+    # Must mention the city or state for local relevance
+    location_mentioned = False
+    if city and len(city) > 2:
+        location_mentioned = city.lower() in text
+    if state and len(state) > 2 and not location_mentioned:
+        location_mentioned = state.lower() in text
+
+    if not location_mentioned:
+        return False
+
+    # Must have safety/tourism relevance
+    safety_keywords = [
+        "tourist",
+        "tourism",
+        "travel",
+        "visitor",
+        "crime",
+        "safety",
+        "security",
+        "robbery",
+        "theft",
+        "scam",
+        "attack",
+        "warning",
+        "advisory",
+        "caution",
+        "incident",
+        "assault",
+        "harassment",
+        "fraud",
+        "danger",
+        "risk",
+        "alert",
+        "mugging",
+        "pickpocket",
+        "kidnap",
+        "violence",
+        "protest",
+        "unrest",
+    ]
+
+    return any(keyword in text for keyword in safety_keywords)
+
+
+def _categorize_safety_news(title: str, content: str) -> str:
+    """Categorize the type of safety news"""
+    text = f"{title} {content}".lower()
+
+    if any(word in text for word in ["robbery", "theft", "mugging", "pickpocket"]):
+        return "property_crime"
+    elif any(word in text for word in ["attack", "assault", "violence", "murder"]):
+        return "violent_crime"
+    elif any(word in text for word in ["scam", "fraud", "cheat"]):
+        return "fraud"
+    elif any(word in text for word in ["protest", "unrest", "riot"]):
+        return "civil_unrest"
+    elif any(word in text for word in ["advisory", "warning", "alert"]):
+        return "travel_advisory"
+    else:
+        return "general_safety"
 
 
 def _fetch_news_api(lat: float, lon: float, api_key: str):
@@ -429,10 +537,14 @@ def llmchat(lat: float, lon: float, weather_data: dict):
     return risk_info
 
 
-load_dotenv()
-
 app = FastAPI()
-app.cors_origins = ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/check")
