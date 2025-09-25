@@ -432,6 +432,7 @@ def llmchat(lat: float, lon: float, weather_data: dict):
 load_dotenv()
 
 app = FastAPI()
+app.cors_origins = ["*"]
 
 
 @app.get("/check")
